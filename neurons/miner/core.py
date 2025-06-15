@@ -80,10 +80,19 @@ class CoreMiner(BaseMinerNeuron):
             self.database_manager
         )
 
-        # Performance tracking
+        # Enhanced performance tracking
         self.campaign_performance = {}  # Track campaign performance
         self.sales_history = []  # Track sales history
         self.conversion_rates = {}  # Track conversion rates by campaign
+        self.performance_metrics = {
+            'total_sales': 0,
+            'total_amount': 0,
+            'avg_sale': 0,
+            'conversion_rate': 0,
+            'refund_rate': 0
+        }
+        self.last_optimization_time = datetime.utcnow()
+        self.optimization_interval = timedelta(minutes=30)
 
         if self.config.mock:
             self.dendrite = MockDendrite(wallet=self.wallet)
@@ -193,11 +202,15 @@ class CoreMiner(BaseMinerNeuron):
             # Get current performance metrics
             performance = await self._track_sales_performance()
             
-            # Add performance data to system load
+            # Add enhanced performance data to system load
             load_data = utils.get_load_average_json()
             load_data.update({
                 'performance_metrics': performance,
-                'campaign_performance': self.campaign_performance
+                'campaign_performance': self.campaign_performance,
+                'optimization_status': {
+                    'last_optimization': self.last_optimization_time.isoformat(),
+                    'next_optimization': (self.last_optimization_time + self.optimization_interval).isoformat()
+                }
             })
             
             self.bit_ads_client.send_system_load(load_data)
@@ -222,40 +235,83 @@ class CoreMiner(BaseMinerNeuron):
         return op_type(**self.__dict__)
 
     async def _optimize_campaign_selection(self):
-        """Optimize campaign selection based on performance metrics"""
+        """Enhanced campaign optimization based on performance metrics"""
         try:
             active_campaigns = await self.campaign_service.get_active_campaigns()
+            current_time = datetime.utcnow()
+            
+            # Only perform full optimization if enough time has passed
+            if current_time - self.last_optimization_time < self.optimization_interval:
+                return active_campaigns
+            
+            self.last_optimization_time = current_time
             
             # Update performance metrics
             for campaign in active_campaigns:
                 campaign_id = campaign.id
                 sales = await self.order_history_service.get_campaign_sales(campaign_id)
                 visits = await self.miner_service.get_campaign_visits(campaign_id)
+                refunds = await self.order_history_service.get_campaign_refunds(campaign_id)
                 
-                # Calculate conversion rate
+                # Calculate advanced metrics
                 conversion_rate = len(sales) / len(visits) if visits else 0
-                self.conversion_rates[campaign_id] = conversion_rate
-                
-                # Calculate average sale value
+                refund_rate = len(refunds) / len(sales) if sales else 0
                 avg_sale = sum(sale.amount for sale in sales) / len(sales) if sales else 0
                 
-                # Update campaign performance
+                # Update campaign performance with more detailed metrics
                 self.campaign_performance[campaign_id] = {
                     'conversion_rate': conversion_rate,
+                    'refund_rate': refund_rate,
                     'avg_sale': avg_sale,
                     'total_sales': len(sales),
-                    'total_visits': len(visits)
+                    'total_visits': len(visits),
+                    'total_refunds': len(refunds),
+                    'last_updated': current_time
                 }
             
-            # Sort campaigns by performance score
+            # Enhanced campaign scoring
+            def calculate_campaign_score(campaign):
+                perf = self.campaign_performance.get(campaign.id, {})
+                if not perf:
+                    return 0
+                
+                # Weight factors
+                sales_weight = 0.90  # Sales amount weight
+                conv_weight = 0.05   # Conversion rate weight
+                refund_weight = 0.05 # Refund rate weight (negative impact)
+                
+                # Calculate normalized scores
+                sales_score = min(perf.get('avg_sale', 0) / 500, 1)  # Normalize to max $500
+                conv_score = min(perf.get('conversion_rate', 0) / 0.05, 1)  # Normalize to 5%
+                refund_penalty = perf.get('refund_rate', 0)  # Higher refund rate = lower score
+                
+                # Calculate final score
+                score = (
+                    sales_score * sales_weight +
+                    conv_score * conv_weight -
+                    refund_penalty * refund_weight
+                )
+                
+                return max(0, score)  # Ensure score is not negative
+            
+            # Sort campaigns by enhanced score
             sorted_campaigns = sorted(
                 active_campaigns,
-                key=lambda c: (
-                    self.campaign_performance.get(c.id, {}).get('avg_sale', 0) * 0.9 +  # Sales weight
-                    self.campaign_performance.get(c.id, {}).get('conversion_rate', 0) * 0.1  # Conversion weight
-                ),
+                key=calculate_campaign_score,
                 reverse=True
             )
+            
+            # Log optimization results
+            bt.logging.info(f"Campaign Optimization Results:")
+            for campaign in sorted_campaigns[:5]:  # Log top 5 campaigns
+                score = calculate_campaign_score(campaign)
+                perf = self.campaign_performance.get(campaign.id, {})
+                bt.logging.info(
+                    f"Campaign {campaign.id}: Score={score:.3f}, "
+                    f"Avg Sale=${perf.get('avg_sale', 0):.2f}, "
+                    f"Conv Rate={perf.get('conversion_rate', 0):.2%}, "
+                    f"Refund Rate={perf.get('refund_rate', 0):.2%}"
+                )
             
             return sorted_campaigns
         except Exception as e:
@@ -263,28 +319,46 @@ class CoreMiner(BaseMinerNeuron):
             return []
 
     async def _track_sales_performance(self):
-        """Track and analyze sales performance"""
+        """Enhanced sales performance tracking"""
         try:
-            # Get recent sales
+            # Get recent sales with extended period
             recent_sales = await self.order_history_service.get_recent_sales(
+                timedelta(days=30)
+            )
+            
+            # Get refunds
+            refunds = await self.order_history_service.get_recent_refunds(
                 timedelta(days=30)
             )
             
             # Update sales history
             self.sales_history = recent_sales
             
-            # Calculate key metrics
+            # Calculate enhanced metrics
             total_sales = len(recent_sales)
             total_amount = sum(sale.amount for sale in recent_sales)
             avg_sale = total_amount / total_sales if total_sales > 0 else 0
+            refund_rate = len(refunds) / total_sales if total_sales > 0 else 0
             
-            bt.logging.info(f"Sales Performance - Total: {total_sales}, Amount: {total_amount}, Avg: {avg_sale}")
-            
-            return {
+            # Update performance metrics
+            self.performance_metrics = {
                 'total_sales': total_sales,
                 'total_amount': total_amount,
-                'avg_sale': avg_sale
+                'avg_sale': avg_sale,
+                'refund_rate': refund_rate,
+                'last_updated': datetime.utcnow()
             }
+            
+            # Log detailed performance
+            bt.logging.info(
+                f"Sales Performance - "
+                f"Total: {total_sales}, "
+                f"Amount: ${total_amount:.2f}, "
+                f"Avg: ${avg_sale:.2f}, "
+                f"Refund Rate: {refund_rate:.2%}"
+            )
+            
+            return self.performance_metrics
         except Exception as e:
             bt.logging.exception(f"Error tracking sales performance: {str(e)}")
             return {}
