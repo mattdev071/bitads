@@ -31,12 +31,12 @@ from template.validator.forward import forward_each_axon
 
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
-# documentation files (the “Software”), to deal in the Software without restriction, including without limitation
+# documentation files (the "Software"), to deal in the Software without restriction, including without limitation
 # the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
 # and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 # The above copyright notice and this permission notice shall be included in all copies or substantial portions of
 # the Software.
-# THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
 # THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
@@ -51,10 +51,12 @@ class CoreMiner(BaseMinerNeuron):
         super(CoreMiner, self).__init__(config=config)
         self.loop = asyncio.get_event_loop()
 
+        # Initialize BitAds client
         self.bit_ads_client = common_dependencies.create_bitads_client(
             self.wallet, self.config.bitads.url, self.neuron_type
         )
 
+        # Initialize services
         self.validators = CommonEnviron.VALIDATORS
         self.miners = CommonEnviron.MINERS
 
@@ -77,6 +79,11 @@ class CoreMiner(BaseMinerNeuron):
         self.migration_service = dependencies.get_migration_service(
             self.database_manager
         )
+
+        # Performance tracking
+        self.campaign_performance = {}  # Track campaign performance
+        self.sales_history = []  # Track sales history
+        self.conversion_rates = {}  # Track conversion rates by campaign
 
         if self.config.mock:
             self.dendrite = MockDendrite(wallet=self.wallet)
@@ -119,7 +126,15 @@ class CoreMiner(BaseMinerNeuron):
             if response and response.result:
                 self.validators = response.validators
                 self.miners = response.miners
-                await self.campaign_service.set_campaigns(response.campaigns)
+                
+                # Get optimized campaign selection
+                optimized_campaigns = await self._optimize_campaign_selection()
+                await self.campaign_service.set_campaigns(optimized_campaigns)
+                
+                # Log performance metrics
+                bt.logging.info(f"Campaign Performance: {self.campaign_performance}")
+                bt.logging.info(f"Conversion Rates: {self.conversion_rates}")
+                
             bt.logging.info("End ping BitAds")
         except Exception as e:
             bt.logging.exception(f"Error in _ping_bitads: {str(e)}")
@@ -174,7 +189,18 @@ class CoreMiner(BaseMinerNeuron):
     async def _send_load_data(self):
         try:
             bt.logging.info("Start send load data to BitAds")
-            self.bit_ads_client.send_system_load(utils.get_load_average_json())
+            
+            # Get current performance metrics
+            performance = await self._track_sales_performance()
+            
+            # Add performance data to system load
+            load_data = utils.get_load_average_json()
+            load_data.update({
+                'performance_metrics': performance,
+                'campaign_performance': self.campaign_performance
+            })
+            
+            self.bit_ads_client.send_system_load(load_data)
             bt.logging.info("End send load data to BitAds")
         except Exception as e:
             bt.logging.exception(f"Error in _send_load_data: {str(e)}")
@@ -194,6 +220,74 @@ class CoreMiner(BaseMinerNeuron):
 
     def _create_operation(self, op_type: Type[BaseOperation]):
         return op_type(**self.__dict__)
+
+    async def _optimize_campaign_selection(self):
+        """Optimize campaign selection based on performance metrics"""
+        try:
+            active_campaigns = await self.campaign_service.get_active_campaigns()
+            
+            # Update performance metrics
+            for campaign in active_campaigns:
+                campaign_id = campaign.id
+                sales = await self.order_history_service.get_campaign_sales(campaign_id)
+                visits = await self.miner_service.get_campaign_visits(campaign_id)
+                
+                # Calculate conversion rate
+                conversion_rate = len(sales) / len(visits) if visits else 0
+                self.conversion_rates[campaign_id] = conversion_rate
+                
+                # Calculate average sale value
+                avg_sale = sum(sale.amount for sale in sales) / len(sales) if sales else 0
+                
+                # Update campaign performance
+                self.campaign_performance[campaign_id] = {
+                    'conversion_rate': conversion_rate,
+                    'avg_sale': avg_sale,
+                    'total_sales': len(sales),
+                    'total_visits': len(visits)
+                }
+            
+            # Sort campaigns by performance score
+            sorted_campaigns = sorted(
+                active_campaigns,
+                key=lambda c: (
+                    self.campaign_performance.get(c.id, {}).get('avg_sale', 0) * 0.9 +  # Sales weight
+                    self.campaign_performance.get(c.id, {}).get('conversion_rate', 0) * 0.1  # Conversion weight
+                ),
+                reverse=True
+            )
+            
+            return sorted_campaigns
+        except Exception as e:
+            bt.logging.exception(f"Error in campaign optimization: {str(e)}")
+            return []
+
+    async def _track_sales_performance(self):
+        """Track and analyze sales performance"""
+        try:
+            # Get recent sales
+            recent_sales = await self.order_history_service.get_recent_sales(
+                timedelta(days=30)
+            )
+            
+            # Update sales history
+            self.sales_history = recent_sales
+            
+            # Calculate key metrics
+            total_sales = len(recent_sales)
+            total_amount = sum(sale.amount for sale in recent_sales)
+            avg_sale = total_amount / total_sales if total_sales > 0 else 0
+            
+            bt.logging.info(f"Sales Performance - Total: {total_sales}, Amount: {total_amount}, Avg: {avg_sale}")
+            
+            return {
+                'total_sales': total_sales,
+                'total_amount': total_amount,
+                'avg_sale': avg_sale
+            }
+        except Exception as e:
+            bt.logging.exception(f"Error tracking sales performance: {str(e)}")
+            return {}
 
 
 if __name__ == "__main__":
